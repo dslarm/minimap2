@@ -3,6 +3,17 @@
 #include <assert.h>
 #include "ksw2.h"
 
+#if defined( __aarch64__ ) && !defined(USE_SIMDE)
+#include <sse2neon.h>
+#ifndef __SSE4_1__
+#define __SSE4_1__
+#endif
+#ifndef __SSE2__
+#define __SSE2__
+#endif
+
+#else
+
 #ifdef __SSE2__
 #ifdef USE_SIMDE
 #include <simde/x86/sse2.h>
@@ -20,6 +31,10 @@
 #include <smmintrin.h>
 #endif
 #endif
+#endif
+#endif // defined(__aarch64__) && !defined(USE_SIMDE)
+
+#ifdef __SSE2__
 
 #ifdef KSW_CPU_DISPATCH
 #ifdef __SSE4_1__

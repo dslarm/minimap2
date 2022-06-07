@@ -3,10 +3,18 @@
 #include <string.h>
 #include "ksw2.h"
 
+
+#if defined( __aarch64__ ) && !defined(USE_SIMDE)
+#include <sse2neon.h>
+#define __SSE4_1__
+#define __SSE2__
+
+#else
 #ifdef USE_SIMDE
 #include <simde/x86/sse2.h>
 #else
 #include <emmintrin.h>
+#endif
 #endif
 
 #ifdef __GNUC__
