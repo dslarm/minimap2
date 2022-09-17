@@ -1,6 +1,6 @@
 #!/usr/bin/env k8
 
-var paftools_version = '2.24-r1132-dirty';
+var paftools_version = '2.24-r1141-dirty';
 
 /*****************************
  ***** Library functions *****
@@ -2345,12 +2345,15 @@ function paf_pbsim2fq(args)
 
 function paf_junceval(args)
 {
-	var c, l_fuzzy = 0, print_ovlp = false, print_err_only = false, first_only = false, chr_only = false;
-	while ((c = getopt(args, "l:epc")) != null) {
+	var c, l_fuzzy = 0, print_ovlp = false, print_err_only = false, first_only = false, chr_only = false, aa = false, is_bed = false;
+	while ((c = getopt(args, "l:epcab1")) != null) {
 		if (c == 'l') l_fuzzy = parseInt(getopt.arg);
 		else if (c == 'e') print_err_only = print_ovlp = true;
 		else if (c == 'p') print_ovlp = true;
 		else if (c == 'c') chr_only = true;
+		else if (c == 'a') aa = true;
+		else if (c == 'b') is_bed = true;
+		else if (c == '1') first_only = true;
 	}
 
 	if (args.length - getopt.ind < 1) {
@@ -2360,6 +2363,9 @@ function paf_junceval(args)
 		print("  -p        print overlapping introns");
 		print("  -e        print erroreous overlapping introns");
 		print("  -c        only consider alignments to /^(chr)?([0-9]+|X|Y)$/");
+		print("  -a        miniprot PAF as input");
+		print("  -b        BED as input");
+		print("  -1        only process the first alignment of each query");
 		exit(1);
 	}
 
@@ -2413,13 +2419,15 @@ function paf_junceval(args)
 
 	file = getopt.ind+1 >= args.length || args[getopt.ind+1] == '-'? new File() : new File(args[getopt.ind+1]);
 	var last_qname = null;
-	var re_cigar = /(\d+)([MIDNSHP=X])/g;
+	var re_cigar = /(\d+)([MIDNSHP=XFGUV])/g;
 	while (file.readline(buf) >= 0) {
 		var m, t = buf.toString().split("\t");
 		var ctg_name = null, cigar = null, pos = null, qname = t[0];
 
 		if (t[0].charAt(0) == '@') continue;
-		if (t[4] == '+' || t[4] == '-' || t[4] == '*') { // PAF
+		if (is_bed) {
+			ctg_name = t[0], pos = parseInt(t[1]), cigar == null;
+		} else if (t[4] == '+' || t[4] == '-' || t[4] == '*') { // PAF
 			ctg_name = t[5], pos = parseInt(t[7]);
 			var type = 'P';
 			for (i = 12; i < t.length; ++i) {
@@ -2449,12 +2457,43 @@ function paf_junceval(args)
 		}
 
 		var intron = [];
-		while ((m = re_cigar.exec(cigar)) != null) {
-			var len = parseInt(m[1]), op = m[2];
-			if (op == 'N') {
-				intron.push([pos, pos + len]);
-				pos += len;
-			} else if (op == 'M' || op == 'X' || op == '=' || op == 'D') pos += len;
+		if (is_bed) {
+			intron.push([pos, parseInt(t[2])]);
+		} else if (aa) {
+			var tmp_junc = [], tmp = 0;
+			while ((m = re_cigar.exec(cigar)) != null) {
+				var len = parseInt(m[1]), op = m[2];
+				if (op == 'N') {
+					tmp_junc.push([tmp, tmp + len]);
+					tmp += len;
+				} else if (op == 'U') {
+					tmp_junc.push([tmp + 1, tmp + len - 2]);
+					tmp += len;
+				} else if (op == 'V') {
+					tmp_junc.push([tmp + 2, tmp + len - 1]);
+					tmp += len;
+				} else if (op == 'M' || op == 'X' || op == '=' || op == 'D') {
+					tmp += len * 3;
+				} else if (op == 'F' || op == 'G') {
+					tmp += len;
+				}
+			}
+			if (t[4] == '+') {
+				for (var i = 0; i < tmp_junc.length; ++i)
+					intron.push([pos + tmp_junc[i][0], pos + tmp_junc[i][1]]);
+			} else if (t[4] == '-') {
+				var glen = parseInt(t[8]) - parseInt(t[7]);
+				for (var i = tmp_junc.length - 1; i >= 0; --i)
+					intron.push([pos + (glen - tmp_junc[i][1]), pos + (glen - tmp_junc[i][0])]);
+			}
+		} else {
+			while ((m = re_cigar.exec(cigar)) != null) {
+				var len = parseInt(m[1]), op = m[2];
+				if (op == 'N') {
+					intron.push([pos, pos + len]);
+					pos += len;
+				} else if (op == 'M' || op == 'X' || op == '=' || op == 'D') pos += len;
+			}
 		}
 		if (intron.length == 0) {
 			++n_sgl;
@@ -3110,6 +3149,140 @@ function paf_pafcmp(args)
 	buf.destroy();
 }
 
+function paf_longcs2seq(args) {
+	var c, opt = { query:false };
+	while ((c = getopt(args, "q")) != null)
+		if (c == 'q') opt.query = true;
+	if (args.length == getopt.ind) {
+		print("Usage: paftools.js longcs2seq [-q] <long-cs.paf>");
+		return;
+	}
+	var re_cs = /([:=*+-])(\d+|[A-Za-z]+)/g
+	var buf = new Bytes();
+	var file = args[getopt.ind] == "-"? new File() : new File(args[getopt.ind]);
+	while (file.readline(buf) >= 0) {
+		var m, cs = null, t = buf.toString().split("\t");
+		for (var i = 12; i < t.length; ++i)
+			if ((m = /^cs:Z:(\S+)/.exec(t[i])) != null) {
+				cs = m[1];
+				break;
+			}
+		if (cs == null) continue;
+		var ts = "", qs = "";
+		while ((m = re_cs.exec(cs)) != null) {
+			if (m[1] == "=") ts += m[2], qs += m[2];
+			else if (m[1] == "+") qs += m[2].toUpperCase();
+			else if (m[1] == "-") ts += m[2].toUpperCase();
+			else if (m[1] == "*") ts += m[2][0].toUpperCase(), qs += m[2][1].toUpperCase();
+			else if (m[1] == ":") throw Error("Long cs is required");
+		}
+		if (opt.query) {
+			print(">" + t[0] + "_" + t[2] + "_" + t[3]);
+			print(qs);
+		} else {
+			print(">" + t[5] + "_" + t[7] + "_" + t[8]);
+			print(ts);
+		}
+	}
+	file.close();
+	buf.destroy();
+}
+
+function paf_paf2gff(args) {
+	var c, opt = { aa:false };
+	var re_cigar = /(\d+)([A-Z=])/g;
+	while ((c = getopt(args, "a")) != null) {
+		if (c == 'a') opt.aa = true;
+	}
+	if (args.length == getopt.ind) {
+		print("Usage: paftools.js paf2gff [-a] <in.paf>");
+		return;
+	}
+	var buf = new Bytes();
+	var file = args[getopt.ind] == '-'? new File() : new File(args[getopt.ind]);
+	var hid = 1, last_name = null;
+	while (file.readline(buf) >= 0) {
+		var m, t = buf.toString().split("\t");
+		if (t[5] == '*') continue; // skip unmapped lines
+
+		if (t[0] != last_name) last_name = t[0], hid = 1;
+		else ++hid;
+		for (var i = 1; i <= 3; ++i) t[i] = parseInt(t[i]);
+		for (var i = 6; i <= 11; ++i) t[i] = parseInt(t[i]);
+		var cigar = null, score = null, np = null, dist_stop = null, dist_start = null;
+		for (var i = 12; i < t.length; ++i) {
+			if ((m = /^(cg:Z|AS:i|np:i|da:i|do:i):(\S+)/.exec(t[i])) != null) {
+				if (m[1] == 'cg:Z') cigar = m[2];
+				else if (m[1] == 'AS:i') score = parseInt(m[2]);
+				else if (m[1] == 'np:i') np = parseInt(m[2]);
+				else if (m[1] == 'do:i') dist_stop = parseInt(m[2]);
+				else if (m[1] == 'da:i') dist_start = parseInt(m[2]);
+			}
+		}
+		if (cigar == null) throw Error("failed to find the cg:Z tag");
+		if (score == null) throw Error("failed to find the AS:i tag");
+
+		var st = 0, en = 0, phase = 0, pseudo = false, fs = 0, a = [];
+		if (dist_start != null && dist_start == 0)
+			a.push([t[5], 'paf2gff', 'start_codon', 0, 3, 0, t[4], '.', 0]);
+		while ((m = re_cigar.exec(cigar)) != null) {
+			var len = parseInt(m[1]);
+			if (m[2] == 'M' || m[2] == 'D') {
+				en += opt.aa? len * 3 : len;
+			} else if (m[2] == 'F' || m[2] == 'G' || m[2] == 'R') {
+				en += len, pseudo = true, fs = 1;
+			} else if (m[2] == 'N') {
+				a.push([t[5], 'paf2gff', 'exon', st, en, 0, t[4], phase, fs]);
+				st = en + len, en += len, phase = 0, fs = 0;
+			} else if (m[2] == 'U') { // ...xGT...AGxx...
+				a.push([t[5], 'paf2gff', 'exon', st, en + 1, 0, t[4], phase, fs]);
+				st = en + len - 2, en += len, phase = 2, fs = 0;
+			} else if (m[2] == 'V') { // ...xxGT...AGx...
+				a.push([t[5], 'paf2gff', 'exon', st, en + 2, 0, t[4], phase, fs]);
+				st = en + len - 1, en += len, phase = 1, fs = 0;
+			}
+		}
+		a.push([t[5], 'paf2gff', 'exon', st, en, 0, t[4], phase, fs]);
+		if (en != t[8] - t[7]) throw Error("inconsistent cigar");
+		if (dist_stop != null && dist_stop == 0)
+			a.push([t[5], 'paf2gff', 'stop_codon', en, en + 3, 0, t[4], '.', 0]);
+		var type = pseudo? 'pseudogene' : 'protein_coding';
+		var attr = ['transcript_id=' + t[0] + '#' + hid, 'transcript_type=' + type].join(";");
+		var trans_attr = 'identity=' + (t[9] / t[10]).toFixed(4);
+		if (np != null) trans_attr += ';positive=' + (np * 3 / t[10]).toFixed(4);
+		trans_attr += ';aa_start=' + t[2];
+		trans_attr += ';aa_end=' + (t[1] - t[3]);
+		if (dist_start != null && dist_start >= 0) trans_attr += ';dist_start_codon=' + dist_start;
+		if (dist_stop != null && dist_stop >= 0) trans_attr += ';dist_stop_codon=' + dist_stop;
+		var trans_st = t[7], trans_en = t[8];
+		if (dist_stop != null && dist_stop == 0) {
+			if (t[4] == '-') trans_st -= 3;
+			else trans_en += 3;
+		}
+		print([t[5], 'paf2gff', 'transcript', trans_st + 1, trans_en, score, t[4], '.', attr + ';' + trans_attr].join("\t"));
+		if (opt.aa && t[4] == '-') {
+			var b = [], len = t[8] - t[7];
+			for (var i = a.length - 1; i >= 0; --i) {
+				var x = len - a[i][3];
+				a[i][3] = len - a[i][4];
+				a[i][4] = x;
+				//a[i][7] = a[i][7] == 0? 0 : 3 - a[i][7]; // not sure if this line is needed
+				b.push(a[i]);
+			}
+			a = b;
+		}
+		for (var i = 0; i < a.length; ++i) {
+			if (!pseudo && a[i][2] == "exon") a[i][2] = "CDS";
+			a[i][3] += t[7] + 1;
+			a[i][4] += t[7];
+			a[i][8] = attr + ";frameshift=" + a[i][8];
+			print(a[i].join("\t"));
+		}
+	}
+	file.close();
+	buf.destroy();
+}
+
 /*************************
  ***** main function *****
  *************************/
@@ -3124,6 +3297,8 @@ function main(args)
 		print("  sam2paf    convert SAM to PAF");
 		print("  delta2paf  convert MUMmer's delta to PAF");
 		print("  gff2bed    convert GTF/GFF3 to BED12");
+		print("  longcs2seq convert long-cs PAF to sequences");
+		print("  paf2gff    convert PAF to GFF3 (tested for miniprot only)");
 		print("");
 		print("  stat       collect basic mapping information in PAF/SAM");
 		print("  asmstat    collect basic assembly information");
@@ -3168,6 +3343,8 @@ function main(args)
 	else if (cmd == 'vcfstat') paf_vcfstat(args);
 	else if (cmd == 'sveval') paf_sveval(args);
 	else if (cmd == 'vcfsel') paf_vcfsel(args);
+	else if (cmd == 'longcs2seq') paf_longcs2seq(args);
+	else if (cmd == 'paf2gff') paf_paf2gff(args);
 	else if (cmd == 'version') print(paftools_version);
 	else throw Error("unrecognized command: " + cmd);
 }
